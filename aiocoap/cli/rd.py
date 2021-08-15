@@ -504,6 +504,40 @@ class EndpointLookupInterface(ThingWithCommonRD, ObservableResource):
 class ResourceLookupInterface(ThingWithCommonRD, ObservableResource):
     ct = link_format_to_message.supported_ct
     rt = "core.rd-lookup-res"
+   
+       async def render_fetch(self, request):
+        eps = self.common_rd.get_endpoints()
+        candidates = ((e, c) for e in eps for c in e.get_based_links().links)
+
+        payload = request.payload
+        payload = payload.decode('utf8')
+        filters_dict = dict(s.split('=', 1) for s in payload.split('&'))
+        print(filters_dict)
+        
+    #        #print(filter1_value)
+        #for (e, c) in candidates:
+           # print(e.get_based_links().links)
+            #print(e.registration_parameters)
+    #            #print(c.attr_pairs)
+    #           if  _link_matches(c, search_key, matches):
+    #               print(e.registration_parameters)
+        
+        for search_key in filters_dict :
+            filter_value = filters_dict.get(search_key)
+            print(filter_value)
+          
+            matches = lambda x: x == filter_value
+            matches = lambda x, original_matches=matches: any(original_matches(v) for v in x.split())
+            print (matches)
+        
+            candidates = ((e, c) for (e, c) in candidates 
+                    if _link_matches(c, search_key, matches) or
+                    (search_key in e.registration_parameters and any(matches(x) for x in e.registration_parameters[search_key]))
+                    )        
+                
+        # strip endpoint
+        candidates = (c for (e, c) in candidates)
+        return link_format_to_message(request, LinkFormat(candidates))
 
     async def render_get(self, request):
         query = query_split(request)
