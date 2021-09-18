@@ -505,38 +505,131 @@ class ResourceLookupInterface(ThingWithCommonRD, ObservableResource):
     ct = link_format_to_message.supported_ct
     rt = "core.rd-lookup-res"
    
-       async def render_fetch(self, request):
+    async def render_fetch(self, request):
+        #get all the resistred endpoints
         eps = self.common_rd.get_endpoints()
-        candidates = ((e, c) for e in eps for c in e.get_based_links().links)
+        candidates = ( (e, c) for e in eps for c in e.get_based_links().links)
 
         payload = request.payload
         payload = payload.decode('utf8')
-        filters_dict = dict(s.split('=', 1) for s in payload.split('&'))
-        print(filters_dict)
-        
-    #        #print(filter1_value)
-        #for (e, c) in candidates:
-           # print(e.get_based_links().links)
-            #print(e.registration_parameters)
-    #            #print(c.attr_pairs)
-    #           if  _link_matches(c, search_key, matches):
-    #               print(e.registration_parameters)
-        
-        for search_key in filters_dict :
-            filter_value = filters_dict.get(search_key)
-            print(filter_value)
-          
-            matches = lambda x: x == filter_value
-            matches = lambda x, original_matches=matches: any(original_matches(v) for v in x.split())
-            print (matches)
-        
-            candidates = ((e, c) for (e, c) in candidates 
-                    if _link_matches(c, search_key, matches) or
-                    (search_key in e.registration_parameters and any(matches(x) for x in e.registration_parameters[search_key]))
-                    )        
+        discovery_request = json.loads(payload)
                 
-        # strip endpoint
-        candidates = (c for (e, c) in candidates)
+        #Hierarchical discovery->Domain        
+        if discovery_request.get('t') == '11':
+            print("Hierarchical discovery->Domain")
+            candidates = ( (e, c) for (e, c) in candidates if 
+                                                e.registration_parameters.get('d')[0] == discovery_request.get('q').split('=')[1]
+                                            )
+        
+        #Hierarchical discovery->Resource
+        if discovery_request.get('t') == '12':
+            rt1 = discovery_request.get('q1').split('=')[1]
+            #print("rt1 = {}".format(rt1))
+            rt2 = discovery_request.get('q2').split('=')[1]
+            #print("rt2 = {}".format(rt2))
+            op = discovery_request.get('op')
+            if op == 'AND':
+                print("***************AND********")
+                candidates = ( (e, c) for (e, c) in candidates if 
+                            c.attr_pairs[0][1] == rt1 or c.attr_pairs[0][1] == rt2
+                       )
+            elif op == 'OR':
+                print("***************OR********") 
+                qos = 30
+                candidates = ( (e, c) for (e, c) in candidates if 
+                                            (c.attr_pairs[0][1] == rt1 and int(c.attr_pairs[3][1]) > qos) or (c.attr_pairs[0][1] == rt2 and int(c.attr_pairs[3][1]) > qos)
+                                       )
+            else:
+                print("***************NOT********")
+         
+        
+        #Hierarchical discovery->Attribute 
+        if discovery_request.get('t') == '13':
+            query_attribs = discovery_request.get('q') 
+            query_attribs = dict(s.split('=') for s in query_attribs.split('&'))
+            iff = query_attribs['if']
+            lt = query_attribs['lt']
+            sz = query_attribs['sz']
+            ct = query_attribs['ct']
+            qos = query_attribs['qos']
+            
+            candidates = ( (e, c) for (e, c) in candidates if 
+                            c.attr_pairs[1][1] == iff and int(c.attr_pairs[4][1]) > int(lt) and int(c.attr_pairs[5][1]) < int(sz) and c.attr_pairs[2][1] == ct and int(c.attr_pairs[3][1]) > int(qos)
+                       ) 
+                       
+        #Group discovery        
+        if discovery_request.get('t') == '2':
+            print("***************Group discovery********")
+            query_attribs = discovery_request.get('q')
+            query_attribs = dict(s.split('=') for s in query_attribs.split('&'))
+            iff = query_attribs['if']
+            gr = query_attribs['gr']
+            d = query_attribs['d']
+            max = query_attribs['max'] 
+            candidates = ( (e, c) for (e, c) in candidates if 
+                            e.registration_parameters ['if'][0] == iff and e.registration_parameters ['gr'][0] == gr and e.registration_parameters ['d'][0] == d
+            )
+            candidates = itertools.islice(candidates, int(max)) # grab the first N resources
+
+        #Gradual discovery        
+        if discovery_request.get('t') == '3':
+            print("***************Gradual discovery********")
+            query_attribs = discovery_request.get('q')
+            query_attribs = dict(s.split('=') for s in query_attribs.split('&'))
+            iff = query_attribs['if']
+            cn = query_attribs['cn']
+            rt_exists = False
+            if 'rt' in query_attribs.keys():
+                rt = query_attribs['rt']
+                rt_exists = True
+            max = query_attribs['max'] 
+            candidates = ( (e, c) for (e, c) in candidates if 
+                            e.registration_parameters ['if'][0] == iff and e.registration_parameters ['cn'][0] == cn and  (c.attr_pairs[0][1] == rt if rt_exists else True)
+            )
+            candidates = itertools.islice(candidates, int(max)) # grab the first N resources
+          
+        
+        #Targeted Response 
+        if discovery_request.get('t') == '5':
+            query_attribs = discovery_request.get('q') 
+            query_attribs = dict(s.split('=') for s in query_attribs.split('&'))
+            iff = query_attribs['if']
+            rt = query_attribs['rt']
+            
+            candidates = ( c for (e, c) in candidates if 
+                            c.attr_pairs[0][1] == rt and c.attr_pairs[1][1] == iff
+                       )
+            tr_attribs = discovery_request.get('tr')
+            tr_attribs = tr_attribs.split('&')
+            candidates = [
+                    Link(l.href,[(k, v) for (k, v) in l.attr_pairs if k in tr_attribs])
+                    for l in candidates]
+                    
+        
+        #Fine-Grained Request 
+        if discovery_request.get('t') == '6':
+            fg_query = discovery_request.get('q')
+            qt = fg_query.get('qt')
+            trg = fg_query.get('trg')
+            l1 = fg_query.get('l1')
+            l2 = fg_query.get('l2')
+            obs_params = fg_query.get('obs')
+            tr = fg_query.get('tr')
+            limit = fg_query.get('lmt')
+            ai = fg_query.get('ai')
+            
+
+        
+        if discovery_request.get('t') != '5':
+            # strip endpoint
+            candidates = (c for (e, c) in candidates)
+            # strip needless anchors : anchor="coap://127.0.0.1:43041/"
+            candidates = [
+                    Link(l.href, [(k, v) for (k, v) in l.attr_pairs if k != 'anchor'])
+                    if dict(l.attr_pairs)['anchor'] == urljoin(l.href, '/')
+                    else l
+                    for l in candidates]
+                
         return link_format_to_message(request, LinkFormat(candidates))
 
     async def render_get(self, request):
