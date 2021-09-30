@@ -31,6 +31,9 @@ import asyncio
 import argparse
 from urllib.parse import urljoin
 import itertools
+import json
+import re
+from cbor2 import  loads
 
 import aiocoap
 from aiocoap.resource import Site, Resource, ObservableResource, PathCapable, WKCResource, link_format_to_message
@@ -504,7 +507,7 @@ class EndpointLookupInterface(ThingWithCommonRD, ObservableResource):
 class ResourceLookupInterface(ThingWithCommonRD, ObservableResource):
     ct = link_format_to_message.supported_ct
     rt = "core.rd-lookup-res"
-   
+    
     async def render_fetch(self, request):
         #get all the resistred endpoints
         eps = self.common_rd.get_endpoints()
@@ -512,29 +515,27 @@ class ResourceLookupInterface(ThingWithCommonRD, ObservableResource):
 
         payload = request.payload
         payload = payload.decode('utf8')
+        #payload = loads(payload)
         discovery_request = json.loads(payload)
                 
         #Hierarchical discovery->Domain        
         if discovery_request.get('t') == '11':
-            print("Hierarchical discovery->Domain")
             candidates = ( (e, c) for (e, c) in candidates if 
-                                                e.registration_parameters.get('d')[0] == discovery_request.get('q').split('=')[1]
+                                                (e.registration_parameters.get('d')[0] == discovery_request.get('q').split('=')[1]  if  'd' in  e.registration_parameters else True)
+                                                and "group" not in e.registration_parameters.get('ep')[0]
+                                                and "col" not in e.registration_parameters.get('ep')[0]
                                             )
         
         #Hierarchical discovery->Resource
         if discovery_request.get('t') == '12':
             rt1 = discovery_request.get('q1').split('=')[1]
-            #print("rt1 = {}".format(rt1))
             rt2 = discovery_request.get('q2').split('=')[1]
-            #print("rt2 = {}".format(rt2))
             op = discovery_request.get('op')
             if op == 'AND':
-                print("***************AND********")
                 candidates = ( (e, c) for (e, c) in candidates if 
                             c.attr_pairs[0][1] == rt1 or c.attr_pairs[0][1] == rt2
                        )
             elif op == 'OR':
-                print("***************OR********") 
                 qos = 30
                 candidates = ( (e, c) for (e, c) in candidates if 
                                             (c.attr_pairs[0][1] == rt1 and int(c.attr_pairs[3][1]) > qos) or (c.attr_pairs[0][1] == rt2 and int(c.attr_pairs[3][1]) > qos)
@@ -559,7 +560,6 @@ class ResourceLookupInterface(ThingWithCommonRD, ObservableResource):
                        
         #Group discovery        
         if discovery_request.get('t') == '2':
-            print("***************Group discovery********")
             query_attribs = discovery_request.get('q')
             query_attribs = dict(s.split('=') for s in query_attribs.split('&'))
             iff = query_attribs['if']
@@ -567,13 +567,14 @@ class ResourceLookupInterface(ThingWithCommonRD, ObservableResource):
             d = query_attribs['d']
             max = query_attribs['max'] 
             candidates = ( (e, c) for (e, c) in candidates if 
-                            e.registration_parameters ['if'][0] == iff and e.registration_parameters ['gr'][0] == gr and e.registration_parameters ['d'][0] == d
+                            (e.registration_parameters ['if'][0] == iff  if 'if' in  e.registration_parameters else True)
+                            and (e.registration_parameters ['gr'][0] == gr if  'gr' in  e.registration_parameters else True)
+                            and (e.registration_parameters ['d'][0] == d if  'd' in  e.registration_parameters else True)
             )
             candidates = itertools.islice(candidates, int(max)) # grab the first N resources
 
         #Gradual discovery        
         if discovery_request.get('t') == '3':
-            print("***************Gradual discovery********")
             query_attribs = discovery_request.get('q')
             query_attribs = dict(s.split('=') for s in query_attribs.split('&'))
             iff = query_attribs['if']
@@ -584,7 +585,9 @@ class ResourceLookupInterface(ThingWithCommonRD, ObservableResource):
                 rt_exists = True
             max = query_attribs['max'] 
             candidates = ( (e, c) for (e, c) in candidates if 
-                            e.registration_parameters ['if'][0] == iff and e.registration_parameters ['cn'][0] == cn and  (c.attr_pairs[0][1] == rt if rt_exists else True)
+                            (e.registration_parameters ['if'][0] == iff if 'if' in  e.registration_parameters else True)
+                            and (e.registration_parameters ['cn'][0] == cn if 'cn' in  e.registration_parameters else True)
+                            and  (c.attr_pairs[0][1] == rt if rt_exists else True)
             )
             candidates = itertools.islice(candidates, int(max)) # grab the first N resources
           
@@ -613,16 +616,173 @@ class ResourceLookupInterface(ThingWithCommonRD, ObservableResource):
             trg = fg_query.get('trg')
             l1 = fg_query.get('l1')
             l2 = fg_query.get('l2')
-            obs_params = fg_query.get('obs')
+            
+            obs_params = fg_query.get('obs') if 'obs' in fg_query else {}
             tr = fg_query.get('tr')
-            limit = fg_query.get('lmt')
-            ai = fg_query.get('ai')
+            tr_attribs = tr.split('&')
+            limit = fg_query.get('lmt') if 'lmt' in fg_query else 9999999
+            ai = fg_query.get('ai') if 'ai' in fg_query else {}
+            
+            if qt == 'EXINC':
+                l3 = [i.split(".")[0] for i in l2]
+                #Group
+                if trg == 'g':
+                    candidates = ( c for (e, c) in candidates if 
+                                        (e.registration_parameters ['if'][0] == 'core.gp' if 'if' in  e.registration_parameters else True)
+                                        and (e.registration_parameters ['gr'][0] in l1 if 'gr' in  e.registration_parameters else True) 
+                                        and (e.registration_parameters ['bl'][0] not in l2 if 'bl' in  e.registration_parameters else True) 
+                                        and (c.attr_pairs[0][1] not in l3) 
+                                        and (c.attr_pairs[6][1] == ai['sec'] if 'sec' in ai else True) 
+                                        and (c.attr_pairs[7][1] == ai['man'] if 'man' in ai else True)
+                                    )
+                #Domain
+                if trg == 'd':
+                    l3 = []
+                    for x in range(10): 
+                        l3 += [i+".off"+str(x+1) for i in l1]
+                    candidates = ( c for (e, c) in candidates if 
+                                                (e.registration_parameters.get('d')[0] in l3 if 'd' in  e.registration_parameters else True)
+                                                and (e.registration_parameters.get('d')[0]  not in l2 if 'd' in  e.registration_parameters else True)
+                                                and (c.attr_pairs[6][1] == ai['sec'] if 'sec' in ai else True) 
+                                                and (c.attr_pairs[7][1] == ai['man'] if 'man' in ai else True)
+                                            )
+                                            
+                #Resource
+                if trg == 'r':
+                    patternSensor = patternActuator = re.compile("all")
+                    if "ipso.sen" in l1:
+                        patternSensor = re.compile("ipso.sen*")
+                    if "ipso.act" in l1:
+                        patternActuator = re.compile("ipso.act*")
+                    candidates = ( c for (e, c) in candidates if 
+                            (  patternSensor.match(c.attr_pairs[0][1]) or patternActuator.match(c.attr_pairs[0][1])) and c.attr_pairs[0][1]  not in l2
+                            and (c.attr_pairs[6][1] == ai['sec'] if 'sec' in ai else True) and (c.attr_pairs[7][1] == ai['man'] if 'man' in ai else True)
+                       )
+
+                #Attribute
+                if trg == 'a':
+                    query_attribs_to_include = dict(s.split('=') for s in l1.split('&'))
+                    query_attribs_to_exclude = dict(s.split('=') for s in l2.split('&'))
+                    candidates = ( c for (e, c) in candidates if 
+                                    #attributes to include
+                                    (c.attr_pairs[1][1] == query_attribs_to_include['if'] if 'if' in query_attribs_to_include.keys() else True)  and
+                                    (int(c.attr_pairs[4][1]) > int(query_attribs_to_include['lt']) if 'lt' in query_attribs_to_include.keys() else True) and 
+                                    (int(c.attr_pairs[5][1]) < int(query_attribs_to_include['sz'] ) if 'sz' in query_attribs_to_include.keys() else True) and 
+                                    (c.attr_pairs[2][1] == query_attribs_to_include['ct'] if 'ct' in query_attribs_to_include.keys() else True) and 
+                                    (int(c.attr_pairs[3][1]) > int(query_attribs_to_include['qos'] ) if 'qos' in query_attribs_to_include.keys() else True) and
+                                    
+                                   #attributes to exclude
+                                    (c.attr_pairs[1][1] != query_attribs_to_exclude['if'] if 'if' in query_attribs_to_exclude.keys() else True) and
+                                    (int(c.attr_pairs[4][1]) < int(query_attribs_to_exclude['lt']) if 'lt' in query_attribs_to_exclude.keys() else True) and 
+                                    (int(c.attr_pairs[5][1]) > int(query_attribs_to_exclude['sz'] ) if 'sz' in query_attribs_to_exclude.keys() else True) and 
+                                    (c.attr_pairs[2][1] != query_attribs_to_exclude['ct'] if 'ct' in query_attribs_to_exclude.keys() else True) and 
+                                    (int(c.attr_pairs[3][1]) < int(query_attribs_to_exclude['qos'] ) if 'qos' in query_attribs_to_exclude.keys() else True)
+                                    
+                                    and (c.attr_pairs[6][1] == ai['sec'] if 'sec' in ai else True) and (c.attr_pairs[7][1] == ai['man'] if 'man' in ai else True)
+                               ) 
+                    
+            elif qt == 'INC':
+                #Group
+                if trg == 'g':
+                    candidates = ( c for (e, c) in candidates if 
+                                        (e.registration_parameters ['if'][0] == 'core.gp' if 'if' in  e.registration_parameters else True)
+                                        and (e.registration_parameters ['gr'][0] in l1 if 'gr' in  e.registration_parameters else True)
+                                        and (c.attr_pairs[6][1] == ai['sec'] if 'sec' in ai else True) 
+                                        and (c.attr_pairs[7][1] == ai['man'] if 'man' in ai else True)
+                                    )
+                #Domain
+                if trg == 'd':
+                    l3 = []
+                    for x in range(10): 
+                        l3 += [i+".off"+str(x+1) if "off" not in i else i for i in l1]
+                    candidates = ( c for (e, c) in candidates if 
+                                                (e.registration_parameters.get('d')[0] in l3 if 'd' in  e.registration_parameters else True)
+                                                and (c.attr_pairs[6][1] == ai['sec'] if 'sec' in ai else True) and (c.attr_pairs[7][1] == ai['man'] if 'man' in ai else True)
+                                            )
+                                            
+                #Resource
+                if trg == 'r':
+                    candidates = ( c for (e, c) in candidates if 
+                            (  c.attr_pairs[0][1] in l1)
+                            and (c.attr_pairs[6][1] == ai['sec'] if 'sec' in ai else True) and (c.attr_pairs[7][1] == ai['man'] if 'man' in ai else True)
+                       )
+
+                #Attribute
+                if trg == 'a':
+                    query_attribs_to_include = dict(s.split('=') for s in l1.split('&'))
+                    candidates = ( c for (e, c) in candidates if 
+                                    #attributes to include
+                                    (c.attr_pairs[1][1] == query_attribs_to_include['if'] if 'if' in query_attribs_to_include.keys() else True)  and
+                                    (int(c.attr_pairs[4][1]) > int(query_attribs_to_include['lt']) if 'lt' in query_attribs_to_include.keys() else True) and 
+                                    (int(c.attr_pairs[5][1]) < int(query_attribs_to_include['sz'] ) if 'sz' in query_attribs_to_include.keys() else True) and 
+                                    (c.attr_pairs[2][1] == query_attribs_to_include['ct'] if 'ct' in query_attribs_to_include.keys() else True) and 
+                                    (int(c.attr_pairs[3][1]) > int(query_attribs_to_include['qos'] ) if 'qos' in query_attribs_to_include.keys() else True)
+                                    
+                                    and (c.attr_pairs[6][1] == ai['sec'] if 'sec' in ai else True) and (c.attr_pairs[7][1] == ai['man'] if 'man' in ai else True)
+                               ) 
+                
+            else:
+                #Group
+                if trg == 'g':
+                    for l in l1:
+                        is_all = True if "all.bldg" in l else False
+                    if is_all == False:
+                        candidates = ( c for (e, c) in candidates if 
+                                            (e.registration_parameters ['if'][0] == 'core.gp' if 'if' in  e.registration_parameters else True)
+                                            and (e.registration_parameters ['gr'][0] not in l1 if 'gr' in  e.registration_parameters else True)
+                                            and ("all.bldg" not in e.registration_parameters ['gr'][0] if 'gr' in  e.registration_parameters else True)
+                                            and (c.attr_pairs[6][1] == ai['sec'] if 'sec' in ai else True) 
+                                            and (c.attr_pairs[7][1] == ai['man'] if 'man' in ai else True)
+                                        )
+                    else:#use all groups
+                        candidates = ( c for (e, c) in candidates if
+                                            (e.registration_parameters ['if'][0] == 'core.gp' if 'if' in  e.registration_parameters else True)
+                                            and (e.registration_parameters ['gr'][0] not in l1 if 'gr' in  e.registration_parameters else True)
+                                            and (e.registration_parameters ['bl'][0] not in l1 if 'bls' in  e.registration_parameters else True)
+                                            and (c.attr_pairs[6][1] == ai['sec'] if 'sec' in ai else True) and (c.attr_pairs[7][1] == ai['man'] if 'man' in ai else True)
+                                        )
+                #Domain
+                if trg == 'd':
+                    l3 = []
+                    for x in range(10): 
+                        l3 += [i+".off"+str(x+1) if "off" not in i else i for i in l1]
+                    candidates = ( c for (e, c) in candidates if 
+                                                (e.registration_parameters.get('d')[0]  not in l3  if 'd' in  e.registration_parameters else True)
+                                                and (c.attr_pairs[6][1] == ai['sec'] if 'sec' in ai else True) and (c.attr_pairs[7][1] == ai['man'] if 'man' in ai else True)
+                                            )
+                                            
+                #Resource
+                if trg == 'r':
+                    candidates = ( c for (e, c) in candidates if 
+                            c.attr_pairs[0][1] not in l1
+                            and (c.attr_pairs[6][1] == ai['sec'] if 'sec' in ai else True) and (c.attr_pairs[7][1] == ai['man'] if 'man' in ai else True)
+                       )
+
+                #Attribute
+                if trg == 'a':
+                    query_attribs_to_exclude = dict(s.split('=') for s in l1.split('&'))
+                    candidates = ( c for (e, c) in candidates if 
+                                   #attributes to exclude
+                                    (c.attr_pairs[1][1] != query_attribs_to_exclude['if'] if 'if' in query_attribs_to_exclude.keys() else True) and
+                                    (int(c.attr_pairs[4][1]) < int(query_attribs_to_exclude['lt']) if 'lt' in query_attribs_to_exclude.keys() else True) and 
+                                    (int(c.attr_pairs[5][1]) > int(query_attribs_to_exclude['sz'] ) if 'sz' in query_attribs_to_exclude.keys() else True) and 
+                                    (c.attr_pairs[2][1] != query_attribs_to_exclude['ct'] if 'ct' in query_attribs_to_exclude.keys() else True) and 
+                                    (int(c.attr_pairs[3][1]) < int(query_attribs_to_exclude['qos'] ) if 'qos' in query_attribs_to_exclude.keys() else True)
+                                    
+                                    and (c.attr_pairs[6][1] == ai['sec'] if 'sec' in ai else True) and (c.attr_pairs[7][1] == ai['man'] if 'man' in ai else True)
+                               ) 
+                
+            candidates = itertools.islice(candidates, int(limit)) # grab the first N resources
+            candidates = [
+                Link(l.href,[(k, v) for (k, v) in l.attr_pairs if k in tr_attribs])
+                for l in candidates]
             
 
         
-        if discovery_request.get('t') != '5':
+        if discovery_request.get('t') not in ['5', '6']:
             # strip endpoint
             candidates = (c for (e, c) in candidates)
+            
             # strip needless anchors : anchor="coap://127.0.0.1:43041/"
             candidates = [
                     Link(l.href, [(k, v) for (k, v) in l.attr_pairs if k != 'anchor'])
@@ -631,6 +791,7 @@ class ResourceLookupInterface(ThingWithCommonRD, ObservableResource):
                     for l in candidates]
                 
         return link_format_to_message(request, LinkFormat(candidates))
+        
 
     async def render_get(self, request):
         query = query_split(request)
@@ -789,6 +950,20 @@ class StandaloneResourceDirectory(Proxy, Site):
             return await Proxy.render(self, request)
         else:
             return await Site.render(self, request)
+
+    # See render; necessary on all functions thanks to https://github.com/chrysn/aiocoap/issues/251
+
+    async def needs_blockwise_assembly(self, request):
+        if request.opt.uri_host in self.common_rd.proxy_active:
+            return await Proxy.needs_blockwise_assembly(self, request)
+        else:
+            return await Site.needs_blockwise_assembly(self, request)
+
+    async def add_observation(self, request, serverobservation):
+        if request.opt.uri_host in self.common_rd.proxy_active:
+            return await Proxy.add_observation(self, request, serverobservation)
+        else:
+            return await Site.add_observation(self, request, serverobservation)
 
 def build_parser():
     p = argparse.ArgumentParser(description=__doc__)
